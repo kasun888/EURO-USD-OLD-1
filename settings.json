@@ -1,9 +1,13 @@
 {
-  "position_size_pct": 0.30,
-  "stop_loss_pct": 0.005,
-  "take_profit_pct": 0.010,
-  "max_trades_day": 3,
+  "position_size_pct": 0.25,
+  "stop_loss_pct": 0.003,
+  "take_profit_pct": 0.006,
+  "max_trades_day": 5,
   "max_daily_loss": 50.0,
   "signal_threshold": 4,
-  "demo_mode": true
+  "demo_mode": true,
+  "trade_btc": true,
+  "trade_eth": true,
+  "trade_sol": true,
+  "trade_gold": false
 }
