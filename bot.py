@@ -178,6 +178,7 @@ def run_bot():
         return
 
     # ── Scan ALL Assets ───────────────────────────────────────────────────────
+    scan_results = []
     for asset, info in ASSETS.items():
         # Check if this asset is enabled in settings
         if not settings.get(info["setting"], False):
@@ -190,15 +191,33 @@ def run_bot():
             break
 
         trade_asset(
-            asset        = asset,
-            inst_id      = info["instId"],
-            settings     = settings,
-            trader       = trader,
-            signals      = signal,
-            alert        = alert,
-            today        = today,
+            asset          = asset,
+            inst_id        = info["instId"],
+            settings       = settings,
+            trader         = trader,
+            signals        = signal,
+            alert          = alert,
+            today          = today,
             trade_log_file = trade_log_file
         )
+
+        # Collect scan summary
+        score, direction, details = signal.analyze(asset=asset)
+        scan_results.append(f"{info['emoji']} {asset}: {score}/5 → {direction}")
+
+    # ── Always Send Telegram Summary ─────────────────────────────────────────
+    summary = "\n".join(scan_results) if scan_results else "No assets scanned"
+    alert.send(
+        f"🤖 Bot Scan Complete!\n"
+        f"{'─'*20}\n"
+        f"Time: {now.strftime('%H:%M SGT')}\n"
+        f"Trades today: {today['trades']}/{settings['max_trades_day']}\n"
+        f"Daily PnL: ${today['daily_pnl']:.2f} SGD\n"
+        f"{'─'*20}\n"
+        f"{summary}\n"
+        f"{'─'*20}\n"
+        f"{'[DEMO 🎮]' if settings['demo_mode'] else '[LIVE 💰]'}"
+    )
 
     # ── End of Cycle Summary ──────────────────────────────────────────────────
     log.info(f"\n{'='*40}")
