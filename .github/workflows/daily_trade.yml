@@ -5,7 +5,7 @@ on:
     # Runs every 30 mins from 8am to 6pm Singapore time (UTC+8)
     # SGT 8:00am  = UTC 0:00
     # SGT 6:00pm  = UTC 10:00
-    - cron: '0,30 0-10 * * 1-5'  # Mon-Fri every 30 mins
+    - cron: '*/5 0-10 * * 1-5'  # Mon-Fri every 30 mins
 
   workflow_dispatch:  # Manual trigger button in GitHub ✅
 
