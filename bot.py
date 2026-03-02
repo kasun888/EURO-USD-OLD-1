@@ -166,31 +166,57 @@ def run_bot():
     settings = load_settings()
     sg_tz    = pytz.timezone("Asia/Singapore")
     now      = datetime.now(sg_tz)
+    alert    = TelegramAlert()
 
     log.info(f"📅 {now.strftime('%Y-%m-%d %H:%M SGT')} | Demo: {settings['demo_mode']}")
 
-    # IG Forex market hours (SGT):
-    # Forex: 24hrs Mon-Fri
-    # Gold:  24hrs Mon-Fri
-    # Skip weekends
-    if now.weekday() >= 5:  # Saturday=5, Sunday=6
-        log.info("📅 Weekend. Markets closed. Skipping.")
+    # Detect trading session for info only
+    hour = now.hour
+    if 5 <= hour < 7:
+        session = "🇦🇺 Sydney"
+    elif 7 <= hour < 15:
+        session = "🇯🇵 Tokyo/Asia"
+    elif 15 <= hour < 20:
+        session = "🇬🇧 London"
+    elif 20 <= hour <= 23 or hour < 1:
+        session = "🇬🇧🇺🇸 London+NY (BEST!)"
+    else:
+        session = "🇺🇸 New York"
+
+    # Skip ONLY weekends (Forex closes Friday 5am SGT → Monday 5am SGT)
+    if now.weekday() == 5:  # Saturday = full day closed
+        log.info("📅 Saturday. Markets closed.")
+        alert.send(f"📅 Saturday - markets closed. Bot resumes Monday! 💤")
         return
 
-    # Trading hours 8am - 10pm SGT (London + NY sessions best)
-    if now.hour < 8 or now.hour >= 22:
-        log.info("⏰ Outside trading hours (8am-10pm SGT). Skipping.")
+    if now.weekday() == 6 and now.hour < 5:  # Sunday before 5am SGT
+        log.info("📅 Sunday early. Markets still closed.")
+        alert.send(f"📅 Markets open soon! Sunday {now.strftime('%H:%M SGT')}")
         return
 
-    # Initialize
+    if now.weekday() == 4 and now.hour >= 5:  # Friday after 5am = still open
+        pass  # Markets still open Friday!
+
+    # Login to IG
+    alert.send(
+        f"🔄 Bot starting...\n"
+        f"Time: {now.strftime('%H:%M SGT')}\n"
+        f"Session: {session}"
+    )
     trader = IGTrader(demo=settings["demo_mode"])
     if not trader.login():
-        alert = TelegramAlert()
-        alert.send("❌ IG Login failed! Check credentials in GitHub Secrets!")
+        alert.send(
+            f"❌ IG Login failed!\n"
+            f"Check GitHub Secrets:\n"
+            f"IG_USERNAME ✓?\n"
+            f"IG_PASSWORD ✓?\n"
+            f"IG_API_KEY5 ✓?\n"
+            f"IG_ACC_NUMBER ✓?"
+        )
         return
 
+    alert.send(f"✅ IG Login success! Scanning {session}...")
     signal = SignalEngine()
-    alert  = TelegramAlert()
 
     # Load today's log
     trade_log_file = f"trades_{now.strftime('%Y%m%d')}.json"
