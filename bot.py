@@ -1,6 +1,7 @@
 """
 OANDA Trading Bot
 EUR/USD + GBP/USD + Gold (XAU_USD)
+Stop Loss + Take Profit handled by OANDA automatically!
 """
 
 import os
@@ -12,7 +13,6 @@ import pytz
 from oanda_trader import OandaTrader
 from signals import SignalEngine
 from telegram_alert import TelegramAlert
-from auto_tune import AutoTuner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,17 +24,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# OANDA uses underscore format: EUR_USD not EURUSD
+# Position sizes tuned for $30 SGD/day target
 ASSETS = {
     "EUR_USD": {
         "instrument": "EUR_USD",
         "asset":      "EURUSD",
-        "label":      "Euro/USD",
+        "label":      "EUR/USD",
         "emoji":      "💱",
         "setting":    "trade_eurusd",
-        "size":       1000,    # 1000 units = micro lot
-        "stop":       15,      # 15 pips
-        "limit":      30,      # 30 pips
+        "size":       10000,   # 10,000 units = mini lot = $1/pip
+        "stop_pips":  15,      # 15 pip stop = -$15 max loss
+        "tp_pips":    25,      # 25 pip target = +$25 profit
     },
     "GBP_USD": {
         "instrument": "GBP_USD",
@@ -42,9 +42,9 @@ ASSETS = {
         "label":      "GBP/USD",
         "emoji":      "💷",
         "setting":    "trade_gbpusd",
-        "size":       1000,
-        "stop":       20,
-        "limit":      40,
+        "size":       10000,   # $1/pip
+        "stop_pips":  20,      # -$20 max loss
+        "tp_pips":    30,      # +$30 profit
     },
     "XAU_USD": {
         "instrument": "XAU_USD",
@@ -52,17 +52,17 @@ ASSETS = {
         "label":      "Gold",
         "emoji":      "🥇",
         "setting":    "trade_gold",
-        "size":       1,       # 1 oz gold
-        "stop":       150,
-        "limit":      300,
+        "size":       2,       # 2 oz gold
+        "stop_pips":  200,     # $4 max loss (2oz x $2)
+        "tp_pips":    400,     # $8 profit (2oz x $4)
     },
 }
 
 def load_settings():
     default = {
-        "max_trades_day":   5,
-        "max_daily_loss":   50.0,
-        "signal_threshold": 4,
+        "max_trades_day":   4,
+        "max_daily_loss":   60.0,
+        "signal_threshold": 3,
         "demo_mode":        True,
         "trade_eurusd":     True,
         "trade_gbpusd":     True,
@@ -84,52 +84,43 @@ def run_bot():
     now      = datetime.now(sg_tz)
     alert    = TelegramAlert()
 
-    # Detect session
+    # Session detection
     hour = now.hour
-    if 5 <= hour < 7:
-        session = "Sydney"
-    elif 7 <= hour < 15:
-        session = "Tokyo/Asia"
-    elif 15 <= hour < 20:
-        session = "London"
-    elif 20 <= hour <= 23 or hour < 1:
-        session = "London+NY BEST!"
+    if 15 <= hour <= 17:
+        session = "London Open (HOT!)"
+    elif 21 <= hour <= 23:
+        session = "London+NY Overlap (BEST!)"
+    elif 20 == hour:
+        session = "NY Open (Active!)"
+    elif 7 <= hour <= 9:
+        session = "Tokyo Open"
+    elif 1 <= hour <= 6:
+        session = "Asia Slow"
     else:
-        session = "New York"
+        session = "Inter-session"
 
-    # Skip Saturday + early Sunday
+    # Skip Saturday
     if now.weekday() == 5:
-        alert.send("Saturday - markets closed!")
-        return
-    if now.weekday() == 6 and now.hour < 5:
-        alert.send("Sunday early - markets opening soon!")
+        alert.send("Saturday - markets closed! See you Monday!")
         return
 
-    alert.send(
-        f"OANDA Bot starting!\n"
-        f"Time: {now.strftime('%H:%M SGT')}\n"
-        f"Session: {session}"
-    )
+    # Skip early Sunday
+    if now.weekday() == 6 and hour < 5:
+        alert.send("Sunday early - markets open at 5am SGT!")
+        return
 
-    # Login
+    # Login to OANDA
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
         alert.send(
-            f"OANDA Login failed!\n"
-            f"Check GitHub Secrets:\n"
-            f"OANDA_API_KEY correct?\n"
-            f"OANDA_ACCOUNT_ID correct?"
+            f"OANDA Login FAILED!\n"
+            f"Check secrets:\n"
+            f"OANDA_API_KEY\n"
+            f"OANDA_ACCOUNT_ID"
         )
         return
 
     balance = trader.get_balance()
-    alert.send(
-        f"OANDA Login success!\n"
-        f"Balance: ${balance:.2f}\n"
-        f"Scanning markets..."
-    )
-
-    signals = SignalEngine()
 
     # Load today log
     trade_log = f"trades_{now.strftime('%Y%m%d')}.json"
@@ -137,25 +128,49 @@ def run_bot():
         with open(trade_log) as f:
             today = json.load(f)
     except FileNotFoundError:
-        today = {"trades": 0, "daily_pnl": 0.0, "stopped": False}
+        today = {
+            "trades":    0,
+            "daily_pnl": 0.0,
+            "stopped":   False,
+            "wins":      0,
+            "losses":    0
+        }
 
+    # Daily loss protection
     if today.get("stopped"):
-        alert.send("Daily loss limit hit! Stopped for today.")
+        alert.send(
+            f"Daily loss limit hit!\n"
+            f"Bot stopped for today.\n"
+            f"PnL: ${today['daily_pnl']:.2f}\n"
+            f"Resumes tomorrow!"
+        )
         return
 
     if today["daily_pnl"] <= -settings["max_daily_loss"]:
         today["stopped"] = True
         with open(trade_log, "w") as f:
             json.dump(today, f, indent=2)
-        alert.send(f"Daily loss ${settings['max_daily_loss']} hit! Stopped.")
+        alert.send(
+            f"STOP! Daily loss ${abs(today['daily_pnl']):.2f}\n"
+            f"Limit: ${settings['max_daily_loss']}\n"
+            f"Bot stopped for today! Resume tomorrow."
+        )
         return
 
+    # Max trades check
     if today["trades"] >= settings["max_trades_day"]:
-        alert.send(f"Max {settings['max_trades_day']} trades reached!")
+        alert.send(
+            f"Max trades reached today!\n"
+            f"Trades: {today['trades']}/{settings['max_trades_day']}\n"
+            f"PnL: ${today['daily_pnl']:.2f}\n"
+            f"Resume tomorrow!"
+        )
         return
 
-    # Scan all assets
+    signals = SignalEngine()
     scan_results = []
+    new_trades   = 0
+
     for name, config in ASSETS.items():
         if not settings.get(config["setting"], True):
             continue
@@ -164,72 +179,76 @@ def run_bot():
 
         log.info(f"Scanning {name}...")
 
-        # Check existing position
+        # Check if position already open
         position = trader.get_position(name)
         if position:
             pnl = trader.check_pnl(position)
-            log.info(f"{name} open position PnL: {pnl:.2f}")
-
-            # Close if target or stop hit
-            if pnl >= config["limit"] * 0.01 or pnl <= -config["stop"] * 0.01:
-                trader.close_position(name)
-                emoji = "Win!" if pnl > 0 else "Stop loss"
-                alert.send(
-                    f"{config['emoji']} {name} CLOSED\n"
-                    f"PnL: ${pnl:.2f}\n"
-                    f"{emoji}"
-                )
-                today["daily_pnl"] += pnl
-                with open(trade_log, "w") as f:
-                    json.dump(today, f, indent=2)
-            else:
-                scan_results.append(f"{config['emoji']} {name}: open PnL=${pnl:.2f}")
+            long_units  = int(float(position["long"]["units"]))
+            short_units = int(float(position["short"]["units"]))
+            direction   = "BUY" if long_units > 0 else "SELL"
+            scan_results.append(
+                f"{config['emoji']} {name}: {direction} open | PnL ${pnl:+.2f}"
+            )
+            # OANDA auto-closes at SL/TP - no need to manually close!
             continue
 
-        # Get signal
+        # Get signal score
         score, direction, details = signals.analyze(asset=config["asset"])
-        log.info(f"{name}: {score}/5 -> {direction}")
+        log.info(f"{name}: score={score}/5 direction={direction}")
 
         if score < settings["signal_threshold"] or direction == "NONE":
-            scan_results.append(f"{config['emoji']} {name}: {score}/5 skip")
+            scan_results.append(
+                f"{config['emoji']} {name}: {score}/5 - no signal"
+            )
             continue
 
-        # Place trade
+        # Place order - OANDA handles SL and TP automatically!
         result = trader.place_order(
-            instrument    = name,
-            direction     = direction,
-            size          = config["size"],
-            stop_distance = config["stop"],
-            limit_distance= config["limit"]
+            instrument     = name,
+            direction      = direction,
+            size           = config["size"],
+            stop_distance  = config["stop_pips"],
+            limit_distance = config["tp_pips"]
         )
 
         if result["success"]:
             today["trades"] += 1
+            new_trades += 1
             with open(trade_log, "w") as f:
                 json.dump(today, f, indent=2)
 
             price, _, _ = trader.get_price(name)
-            alert.send(
-                f"{config['emoji']} {name} TRADE!\n"
-                f"Direction: {direction}\n"
-                f"Entry: {price}\n"
-                f"Score: {score}/5\n"
-                f"Trade #{today['trades']}\n"
-                f"DEMO mode"
-            )
-            scan_results.append(f"{config['emoji']} {name}: {direction} PLACED!")
-        else:
-            log.error(f"{name} order failed: {result['error']}")
-            scan_results.append(f"{config['emoji']} {name}: failed")
+            mode        = "DEMO" if settings["demo_mode"] else "LIVE"
 
-    # Send summary
-    summary = "\n".join(scan_results) if scan_results else "No signals"
+            alert.send(
+                f"{config['emoji']} NEW TRADE! {mode}\n"
+                f"Pair: {name}\n"
+                f"Direction: {direction}\n"
+                f"Entry: {price:.5f}\n"
+                f"Stop Loss: {config['stop_pips']} pips\n"
+                f"Take Profit: {config['tp_pips']} pips\n"
+                f"Score: {score}/5\n"
+                f"Trade #{today['trades']} today"
+            )
+            scan_results.append(
+                f"{config['emoji']} {name}: {direction} PLACED! Score {score}/5"
+            )
+        else:
+            log.error(f"{name} failed: {result.get('error')}")
+            scan_results.append(f"{config['emoji']} {name}: order failed")
+
+    # Send scan summary
+    summary = "\n".join(scan_results) if scan_results else "No signals found"
+    win_rate = (today["wins"] / max(today["trades"], 1)) * 100
+
     alert.send(
-        f"Scan Done!\n"
+        f"Scan Complete!\n"
         f"Time: {now.strftime('%H:%M SGT')}\n"
         f"Session: {session}\n"
-        f"Trades today: {today['trades']}/{settings['max_trades_day']}\n"
+        f"Balance: ${balance:.2f}\n"
+        f"Trades: {today['trades']}/{settings['max_trades_day']}\n"
         f"Daily PnL: ${today['daily_pnl']:.2f}\n"
+        f"New trades: {new_trades}\n"
         f"---\n"
         f"{summary}"
     )
