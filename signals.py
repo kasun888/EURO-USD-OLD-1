@@ -145,7 +145,7 @@ class SignalEngine:
     def _gold_yield_signal(self):
         try:
             r = requests.get(
-                "https://query1.finance.yahoo.com/v8/finance/chart/^TNX?interval=1d&range=5d",
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5ETNX?interval=1d&range=5d",
                 timeout=10, headers={"User-Agent": "Mozilla/5.0"}
             )
             closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c]
@@ -164,7 +164,7 @@ class SignalEngine:
     def _gold_fear_signal(self):
         try:
             r = requests.get(
-                "https://query1.finance.yahoo.com/v8/finance/chart/^VIX?interval=1d&range=5d",
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=5d",
                 timeout=10, headers={"User-Agent": "Mozilla/5.0"}
             )
             closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c]
@@ -215,23 +215,26 @@ class SignalEngine:
             ema20 = self._ema(closes, 20)
             ema50 = self._ema(closes, 50)
             log.info("Gold EMA20=" + str(round(ema20[-1], 2)) + " EMA50=" + str(round(ema50[-1], 2)))
-            if ema20[-1] > ema50[-1] and ema20[-2] <= ema50[-2]:
-                bull += 2  # Fresh crossover = strong signal!
-                signals.append("EMA20 cross above EMA50 BUY!")
-            elif ema20[-1] < ema50[-1] and ema20[-2] >= ema50[-2]:
-                bear += 2
-                signals.append("EMA20 cross below EMA50 SELL!")
-            elif ema20[-1] > ema50[-1]:
-                bull += 1
-                signals.append("EMA20 above EMA50 uptrend")
-            elif ema20[-1] < ema50[-1]:
-                bear += 1
-                signals.append("EMA20 below EMA50 downtrend")
+            if len(ema20) >= 2 and len(ema50) >= 2:
+                if ema20[-1] > ema50[-1] and ema20[-2] <= ema50[-2]:
+                    bull += 2  # Fresh crossover = strong signal!
+                    signals.append("EMA20 cross above EMA50 BUY!")
+                elif ema20[-1] < ema50[-1] and ema20[-2] >= ema50[-2]:
+                    bear += 2
+                    signals.append("EMA20 cross below EMA50 SELL!")
+                elif ema20[-1] > ema50[-1]:
+                    bull += 1
+                    signals.append("EMA20 above EMA50 uptrend")
+                elif ema20[-1] < ema50[-1]:
+                    bear += 1
+                    signals.append("EMA20 below EMA50 downtrend")
 
             # ATR volatility filter (only trade when gold is moving!)
             atr = self._atr(highs, lows, closes, 14)
-            avg_atr = sum([self._atr(highs[:i+15], lows[:i+15], closes[:i+15], 14)
-                          for i in range(0, min(20, len(closes)-15), 4)]) / 5 if len(closes) > 20 else atr
+            # Safe ATR average calculation
+            atr_samples = [self._atr(highs[:i+15], lows[:i+15], closes[:i+15], 14)
+                           for i in range(0, min(20, len(closes)-15), 4)]
+            avg_atr = sum(atr_samples) / len(atr_samples) if atr_samples else atr
             log.info("Gold ATR: " + str(round(atr, 2)) + " avg: " + str(round(avg_atr, 2)))
             if atr > avg_atr * 1.2:
                 if bull > bear:
@@ -402,7 +405,7 @@ class SignalEngine:
     def _forex_yield_signal(self):
         try:
             r = requests.get(
-                "https://query1.finance.yahoo.com/v8/finance/chart/^TNX?interval=1d&range=5d",
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5ETNX?interval=1d&range=5d",
                 timeout=10, headers={"User-Agent": "Mozilla/5.0"}
             )
             closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c]
@@ -420,7 +423,7 @@ class SignalEngine:
     def _forex_risk_signal(self):
         try:
             r = requests.get(
-                "https://query1.finance.yahoo.com/v8/finance/chart/^GSPC?interval=1d&range=5d",
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=5d",
                 timeout=10, headers={"User-Agent": "Mozilla/5.0"}
             )
             closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c]
@@ -605,9 +608,14 @@ class SignalEngine:
         return 100 - (100 / (1 + ag / al))
 
     def _ema(self, data, period):
+        if not data:
+            return [0.0]
         if len(data) < period:
-            return [sum(data) / len(data)] * len(data)
-        emas = [sum(data[:period]) / period]
+            avg = sum(data) / len(data)
+            return [avg] * len(data)
+        # Pad start so output length always matches input length
+        seed = sum(data[:period]) / period
+        emas = [seed] * period
         mult = 2 / (period + 1)
         for p in data[period:]:
             emas.append((p - emas[-1]) * mult + emas[-1])
