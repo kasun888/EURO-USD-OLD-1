@@ -104,22 +104,30 @@ class OandaTrader:
 
             # Pip size per instrument
             if instrument == "XAU_USD":
-                pip = 0.1         # Gold: 1 pip = $0.10 (at $5000+ price)
+                pip = 0.01        # Gold: 1 pip = $0.01
             elif "JPY" in instrument:
                 pip = 0.01        # JPY pairs
             else:
                 pip = 0.0001      # Forex: 1 pip = 0.0001
 
+            # Decimal precision per instrument
+            if instrument == "XAU_USD":
+                precision = 2     # Gold: 2 decimals e.g. 5140.25
+            elif "JPY" in instrument:
+                precision = 3     # JPY: 3 decimals e.g. 149.500
+            else:
+                precision = 5     # Forex: 5 decimals e.g. 1.16080
+
             # Entry price
             entry = ask if direction == "BUY" else bid
 
-            # SL and TP prices
+            # SL and TP prices with correct precision
             if direction == "BUY":
-                sl_price = round(entry - (stop_distance  * pip), 5)
-                tp_price = round(entry + (limit_distance * pip), 5)
+                sl_price = round(entry - (stop_distance  * pip), precision)
+                tp_price = round(entry + (limit_distance * pip), precision)
             else:
-                sl_price = round(entry + (stop_distance  * pip), 5)
-                tp_price = round(entry - (limit_distance * pip), 5)
+                sl_price = round(entry + (stop_distance  * pip), precision)
+                tp_price = round(entry - (limit_distance * pip), precision)
 
             log.info(f"Placing {direction} {instrument} | units={units} | entry={entry} | SL={sl_price} | TP={tp_price}")
 
