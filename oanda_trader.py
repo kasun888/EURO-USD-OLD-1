@@ -104,7 +104,7 @@ class OandaTrader:
 
             # Pip size per instrument
             if instrument == "XAU_USD":
-                pip = 0.01        # Gold: 1 pip = $0.01
+                pip = 0.1         # Gold: 1 pip = $0.10 (at $5000+ price)
             elif "JPY" in instrument:
                 pip = 0.01        # JPY pairs
             else:
