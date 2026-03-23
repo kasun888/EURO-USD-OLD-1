@@ -6,9 +6,9 @@
   "trade_eurusd": true,
   "trade_gbpusd": true,
   "trade_gold": true,
-  "risk_pct": 0.02,
+  "risk_pct": 0.005,
   "fixed_units": 10000,
-  "fixed_gold_oz": 3,
-  "max_consec_losses": 2,
+  "fixed_gold_oz": 1,
+  "max_consec_losses": 3,
   "max_spread_pips": 2
 }
