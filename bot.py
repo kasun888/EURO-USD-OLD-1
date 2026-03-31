@@ -197,7 +197,19 @@ def run_bot(state):
 
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
-        alert.send("❌ Login FAILED!")
+        api_key    = os.environ.get("OANDA_API_KEY", "").strip()
+        account_id = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
+        if not api_key:
+            alert.send("❌ Login FAILED!\nReason: OANDA_API_KEY is missing in Railway Variables!")
+        elif not account_id:
+            alert.send("❌ Login FAILED!\nReason: OANDA_ACCOUNT_ID is missing in Railway Variables!")
+        else:
+            alert.send(
+                "❌ Login FAILED!\n"
+                "Key: " + api_key[:8] + "****\n"
+                "Account: " + account_id + "\n"
+                "Check Railway logs for HTTP error code."
+            )
         return
 
     current_balance = trader.get_balance()
