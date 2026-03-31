@@ -78,20 +78,26 @@ ASSETS = {
     },
 }
 
-DEFAULT_SETTINGS = {"signal_threshold": 3, "demo_mode": True}
+_DEFAULT_SETTINGS = {"signal_threshold": 3, "demo_mode": True}
 
 # BUG-09 FIX: resolve settings.json relative to this file, not process CWD
 _SETTINGS_PATH = Path(__file__).parent / "settings.json"
 
+# BUG-FIX: CalendarFilter at module level so cache persists across 5-min scans
+# Previously created fresh inside run_bot() losing the day-cache every scan
+_calendar = CalendarFilter()
+
 
 def load_settings():
+    # BUG-FIX: copy defaults fresh each call - never mutate the module-level dict
+    settings = dict(_DEFAULT_SETTINGS)
     try:
         with open(_SETTINGS_PATH) as f:
-            DEFAULT_SETTINGS.update(json.load(f))
+            settings.update(json.load(f))
     except FileNotFoundError:
         with open(_SETTINGS_PATH, "w") as f:
-            json.dump(DEFAULT_SETTINGS, f, indent=2)
-    return DEFAULT_SETTINGS
+            json.dump(settings, f, indent=2)
+    return settings
 
 
 def is_in_session(hour, cfg):
@@ -182,7 +188,7 @@ def run_bot(state):
     now      = datetime.now(sg_tz)
     hour     = now.hour
     alert    = TelegramAlert()
-    calendar = CalendarFilter()
+    calendar = _calendar  # module-level instance, cache persists across scans
 
     log.info("Scan at " + now.strftime("%H:%M:%S SGT"))
 
