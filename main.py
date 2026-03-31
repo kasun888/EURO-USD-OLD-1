@@ -9,6 +9,7 @@ FIX LOG:
   BUG-12: STATE now includes "start_balance" field (was missing — broke daily PnL calc)
   BUG-13: Day-reset block now fetches fresh balance from OANDA to seed start_balance
            (previously reset to 0.0, making daily PnL always show $0)
+  BUG-14: Added hourly heartbeat Telegram message so silence ≠ broken bot
 """
 
 import time
@@ -19,6 +20,7 @@ import pytz
 
 from bot           import run_bot
 from oanda_trader  import OandaTrader
+from telegram_alert import TelegramAlert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +29,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 INTERVAL_MINUTES = 5
+HEARTBEAT_CYCLES = 12   # every 12 × 5 min = 60 min
 
 # ── IN-MEMORY STATE (persists across 5-min runs, resets on restart) ──────────
 STATE = {}
@@ -52,6 +55,7 @@ def fresh_day_state(today_str, balance):
         "cooldowns":     {},
         "open_times":    {},
         "news_alerted":  {},
+        "cycle_count":   0,    # BUG-14: heartbeat counter
     }
 
 
@@ -83,11 +87,41 @@ def main():
             log.info("📅 New day! Balance: $" + str(round(balance, 2)))
             STATE = fresh_day_state(today, balance)
 
+            # Send daily reset notification
+            alert = TelegramAlert()
+            alert.send(
+                "📅 New Day Started\n"
+                "Balance: $" + str(round(balance, 2)) + "\n"
+                "Bot is running every 5 min ✅"
+            )
+
         try:
             run_bot(state=STATE)
         except Exception as e:
             log.error("❌ Bot error: " + str(e))
             log.error(traceback.format_exc())
+
+        # BUG-14 FIX: hourly heartbeat so you know the bot is alive
+        STATE["cycle_count"] = STATE.get("cycle_count", 0) + 1
+        if STATE["cycle_count"] % HEARTBEAT_CYCLES == 0:
+            try:
+                trader  = OandaTrader(demo=True)
+                balance = trader.get_balance() if trader.login() else STATE.get("start_balance", 0.0)
+                start   = STATE.get("start_balance", balance)
+                pnl     = round(balance - start, 2)
+                pnl_sgd = round(pnl * 1.35, 2)
+                pnl_emoji = "✅" if pnl >= 0 else "🔴"
+                alert = TelegramAlert()
+                alert.send(
+                    "💓 Bot Heartbeat\n"
+                    "Time:    " + now.strftime("%H:%M SGT") + "\n"
+                    "Balance: $" + str(round(balance, 2)) + "\n"
+                    "Day P&L: $" + str(pnl) + " " + pnl_emoji + " ≈ SGD " + str(pnl_sgd) + "\n"
+                    "W/L:     " + str(STATE.get("wins", 0)) + "/" + str(STATE.get("losses", 0)) + "\n"
+                    "Trades:  " + str(STATE.get("trades", 0))
+                )
+            except Exception as e:
+                log.warning("Heartbeat send failed: " + str(e))
 
         log.info("💤 Sleeping " + str(INTERVAL_MINUTES) + " mins...")
         time.sleep(INTERVAL_MINUTES * 60)
