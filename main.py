@@ -1,24 +1,31 @@
 """
-Railway Entry Point - OANDA GBP/USD London Scalp Bot
-=====================================================
-Railway runs this 24/7 as a continuous process.
+Railway Entry Point - OANDA EUR/USD London+NY Session Scalp Bot
+================================================================
+Windows (SGT):
+  15:00–19:00 SGT — London Open (EUR/USD prime window)
+  20:00–00:00 SGT — NY Session  (USD flows, second best)
 
-FIX LOG:
-  BUG-12: STATE now includes "start_balance" field
-  BUG-13: Day-reset block fetches fresh balance from OANDA
-  FIX-14: Login FAILED alert suppressed outside London session (15-24 SGT)
-           to prevent Telegram spam during off-hours restarts
-  FIX-15: Startup env-var check — logs clear error if API key missing
-  FIX-16: Off-hours sleep extended to 60s (was 5min already, now explicit)
-           scan interval stays 5min during London session
+FIX LOG (inherited from GBP bot):
+  FIX-01: Login FAILED alert suppressed outside session windows
+  FIX-02: Login fail alert deduplicated per 30-min window
+  FIX-03: Startup Telegram sent so you know bot is alive
+  FIX-04: Session open alert sent once per window per day
+  FIX-05: Crash loop protection — 30s sleep on unhandled exception
+  FIX-06: Max 1 trade per window enforced in bot.py
+
+EUR/USD CHANGES:
+  - Signal threshold: 4/4 (vs 3/3 for GBP — more confirmation needed)
+  - Windows shifted to London 15:00-19:00 + NY 20:00-00:00 SGT
+  - Day reset handles midnight NY window correctly
 """
 
 import os, time, logging, traceback
 from datetime import datetime
 import pytz
 
-from bot          import run_bot, ASSETS, is_in_session
-from oanda_trader import OandaTrader
+from bot            import run_bot, ASSETS, is_in_session
+from oanda_trader   import OandaTrader
+from telegram_alert import TelegramAlert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,10 +34,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 INTERVAL_MINUTES = 5
-
-sg_tz = pytz.timezone("Asia/Singapore")
-
-STATE = {}
+sg_tz            = pytz.timezone("Asia/Singapore")
+STATE            = {}
 
 
 def get_today_key():
@@ -39,77 +44,128 @@ def get_today_key():
 
 def fresh_day_state(today_str, balance):
     return {
-        "date":          today_str,
-        "trades":        0,
-        "start_balance": balance,
-        "daily_pnl":     0.0,
-        "stopped":       False,
-        "wins":          0,
-        "losses":        0,
-        "consec_losses": 0,
-        "cooldowns":     {},
-        "open_times":    {},
-        "news_alerted":  {},
+        "date":               today_str,
+        "trades":             0,
+        "start_balance":      balance,
+        "daily_pnl":          0.0,
+        "stopped":            False,
+        "wins":               0,
+        "losses":             0,
+        "consec_losses":      0,
+        "cooldowns":          {},
+        "open_times":         {},
+        "news_alerted":       {},
+        "windows_used":       {},
+        "session_alerted":    {},
+        "login_fail_alerted": {},
     }
 
 
 def check_env_vars():
-    """Warn loudly at startup if credentials are missing."""
     api_key    = os.environ.get("OANDA_API_KEY", "")
     account_id = os.environ.get("OANDA_ACCOUNT_ID", "")
+    tg_token   = os.environ.get("TELEGRAM_TOKEN", "")
+    tg_chat    = os.environ.get("TELEGRAM_CHAT_ID", "")
+
     if not api_key or not account_id:
         log.error("=" * 50)
-        log.error("❌ MISSING ENV VARS!")
+        log.error("❌ MISSING OANDA ENV VARS!")
         log.error("   OANDA_API_KEY    : " + ("SET ✅" if api_key    else "MISSING ❌"))
         log.error("   OANDA_ACCOUNT_ID : " + ("SET ✅" if account_id else "MISSING ❌"))
-        log.error("   Go to Railway → Variables and set both.")
         log.error("=" * 50)
         return False
+
     log.info("Env vars OK | Key: " + api_key[:8] + "**** | Account: " + account_id)
+    if not tg_token or not tg_chat:
+        log.warning("Telegram not configured — no alerts will be sent")
     return True
 
 
-def is_london_session_now():
+def is_any_session_now():
     now  = datetime.now(sg_tz)
     hour = now.hour
     return any(is_in_session(hour, cfg) for cfg in ASSETS.values())
+
+
+def check_session_open_alerts(alert):
+    """Send one alert when each window opens for the day."""
+    now   = datetime.now(sg_tz)
+    hour  = now.hour
+    today = now.strftime("%Y%m%d")
+
+    windows = [
+        {"start": 15, "label": "London", "desc": "15:00–19:00 SGT"},
+        {"start": 20, "label": "NY",     "desc": "20:00–00:00 SGT"},
+    ]
+
+    for w in windows:
+        if hour == w["start"]:
+            akey = "session_open_" + today + "_" + w["label"]
+            if not STATE.get("session_alerted", {}).get(akey):
+                if "session_alerted" not in STATE:
+                    STATE["session_alerted"] = {}
+                STATE["session_alerted"][akey] = True
+                balance = STATE.get("start_balance", 0.0)
+                alert.send(
+                    "🔔 " + w["label"] + " Window Open!\n"
+                    "⏰ " + now.strftime("%H:%M SGT") + " (" + w["desc"] + ")\n"
+                    "Balance: $" + str(round(balance, 2)) + "\n"
+                    "Scanning EUR/USD..."
+                )
 
 
 def main():
     global STATE
 
     log.info("=" * 50)
-    log.info("🚀 Railway Bot Started - OANDA GBP/USD London Scalp")
-    log.info("Strategy: GBP/USD | SL=13pip | TP=26pip | 15:00-24:00 SGT")
-    log.info("Interval: Every " + str(INTERVAL_MINUTES) + " minutes")
+    log.info("🚀 Railway Bot Started - OANDA EUR/USD London+NY Scalp")
+    log.info("Window 1: 15:00–19:00 SGT (London) | Window 2: 20:00–00:00 SGT (NY)")
+    log.info("EUR/USD | SL=13pip | TP=26pip | Signal: 4/4 | Max 1 trade per window")
     log.info("=" * 50)
 
-    # FIX-15: Check env vars at startup
-    check_env_vars()
+    if not check_env_vars():
+        log.error("Missing env vars — sleeping 60s then exiting")
+        time.sleep(60)
+        return
+
+    alert = TelegramAlert()
+    alert.send(
+        "🚀 EUR/USD Bot Started!\n"
+        "Pair: EUR/USD\n"
+        "SL: 13 pip | TP: 26 pip | 2:1 R:R\n"
+        "Signal: 4/4 (H4+H1+M15+M5)\n"
+        "Window 1: 15:00–19:00 SGT (London)\n"
+        "Window 2: 20:00–00:00 SGT (NY)\n"
+        "Max 2 trades/day"
+    )
 
     while True:
-        now   = datetime.now(sg_tz)
-        today = now.strftime("%Y%m%d")
-        log.info("⏰ " + now.strftime("%Y-%m-%d %H:%M SGT"))
-
-        # Day reset — fetch live balance
-        if STATE.get("date") != today:
-            log.info("📅 New day! Fetching balance for day reset...")
-            try:
-                trader  = OandaTrader(demo=True)
-                balance = trader.get_balance() if trader.login() else 0.0
-            except Exception as e:
-                log.warning("Could not fetch balance for day reset: " + str(e))
-                balance = 0.0
-
-            log.info("📅 New day! Balance: $" + str(round(balance, 2)))
-            STATE = fresh_day_state(today, balance)
-
         try:
+            now   = datetime.now(sg_tz)
+            today = now.strftime("%Y%m%d")
+            log.info("⏰ " + now.strftime("%Y-%m-%d %H:%M SGT"))
+
+            # Day reset
+            if STATE.get("date") != today:
+                log.info("📅 New day! Fetching balance...")
+                try:
+                    trader  = OandaTrader(demo=True)
+                    balance = trader.get_balance() if trader.login() else 0.0
+                except Exception as e:
+                    log.warning("Balance fetch error: " + str(e))
+                    balance = 0.0
+                log.info("📅 New day! Balance: $" + str(round(balance, 2)))
+                STATE = fresh_day_state(today, balance)
+
+            # Session open alerts
+            check_session_open_alerts(alert)
+
             run_bot(state=STATE)
+
         except Exception as e:
             log.error("❌ Bot error: " + str(e))
             log.error(traceback.format_exc())
+            time.sleep(30)
 
         log.info("💤 Sleeping " + str(INTERVAL_MINUTES) + " mins...")
         time.sleep(INTERVAL_MINUTES * 60)
