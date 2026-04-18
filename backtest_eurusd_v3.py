@@ -825,26 +825,36 @@ For 1+ trade/day:
 # SAVE TRADE LOG
 # ═══════════════════════════════════════════════════
 
+
 # ═════════════════════════════════════
-# SAVE TRADE LOG (FIXED)
+# SAVE TRADE LOG (DYNAMIC PATH FIX)
 # ═════════════════════════════════════
 import os
 
-# Use a relative path to ensure it stays within your workspace
-output_dir = "backtest_results" 
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+# 1. Get the directory where the script is currently running
+current_dir = os.getcwd() 
+output_dir = os.path.join(current_dir, "outputs")
 
-# Construct path safely
+# 2. Create the 'outputs' folder inside your current workspace
+try:
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created directory: {output_dir}")
+except Exception as e:
+    print(f"Directory creation failed: {e}")
+
+# 3. Construct the full file path
 out_path = os.path.join(output_dir, "eurusd_backtest_trades.csv")
 
-# Save CSV
+# 4. Save the CSV
 try:
     df_trades.to_csv(out_path, index=False)
-    print(f"\n✅ Trade log saved to: {os.path.abspath(out_path)}")
+    print(f"\n✅ Trade log successfully saved to:")
+    print(f"   {out_path}")
 except Exception as e:
-    print(f"\n❌ Failed to save CSV: {e}")
-    # Fallback: Save directly to root if subdir fails
-    df_trades.to_csv("eurusd_backtest_trades.csv", index=False)
-    print("✅ Saved to root directory as fallback.")
+    print(f"\n❌ Final Save Attempt Failed: {e}")
+    # Absolute fallback: save to the root of the project
+    fallback_path = os.path.join(current_dir, "eurusd_backtest_trades.csv")
+    df_trades.to_csv(fallback_path, index=False)
+    print(f"⚠️ Saved to fallback root: {fallback_path}")
 
