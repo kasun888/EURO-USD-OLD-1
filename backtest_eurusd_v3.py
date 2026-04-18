@@ -826,21 +826,25 @@ For 1+ trade/day:
 # ═══════════════════════════════════════════════════
 
 # ═════════════════════════════════════
-# SAVE TRADE LOG
+# SAVE TRADE LOG (FIXED)
 # ═════════════════════════════════════
-
 import os
 
-# create outputs folder if missing
-output_dir = "outputs"
-os.makedirs(output_dir, exist_ok=True)
+# Use a relative path to ensure it stays within your workspace
+output_dir = "backtest_results" 
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
 
-# file path
+# Construct path safely
 out_path = os.path.join(output_dir, "eurusd_backtest_trades.csv")
 
-# save csv
-df_trades.to_csv(out_path, index=False)
-
-print(f"\n✅ Trade log saved to: {out_path}")
-print(f"Total trades: {len(df_trades)}")
+# Save CSV
+try:
+    df_trades.to_csv(out_path, index=False)
+    print(f"\n✅ Trade log saved to: {os.path.abspath(out_path)}")
+except Exception as e:
+    print(f"\n❌ Failed to save CSV: {e}")
+    # Fallback: Save directly to root if subdir fails
+    df_trades.to_csv("eurusd_backtest_trades.csv", index=False)
+    print("✅ Saved to root directory as fallback.")
 
