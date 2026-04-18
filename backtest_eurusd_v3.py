@@ -825,18 +825,27 @@ For 1+ trade/day:
 # SAVE TRADE LOG
 # ═══════════════════════════════════════════════════
 
+
+
+# ═══════════════════════════════════════════════════
+# SAVE TRADE LOG
+# ═══════════════════════════════════════════════════
+
 import os
 
-# Create output folder inside the repo
-output_dir = "mnt/user-data/outputs"
+# Get current project directory (works in GitHub Codespaces)
+BASE_DIR = os.getcwd()
 
-# Create folder if it doesn't exist
+# Create output directory
+output_dir = os.path.join(BASE_DIR, "outputs")
+
+# Ensure directory exists
 os.makedirs(output_dir, exist_ok=True)
 
-# Output file path
+# Output file
 out_path = os.path.join(output_dir, "eurusd_backtest_trades.csv")
 
-# Save trades
+# Save CSV
 df_trades.to_csv(out_path, index=False)
 
 print(f"\n✅ Trade log saved to: {out_path}")
