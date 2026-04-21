@@ -177,32 +177,34 @@ def detect_sl_tp_hits(state, trader, alert):
         if not data:
             return
 
-        pnl     = float(data[0].get("realizedPL", "0"))
-        pnl_sgd = round(pnl * USD_SGD, 2)
-        wins    = state.get("wins", 0)
-        losses  = state.get("losses", 0)
+        pnl        = float(data[0].get("realizedPL", "0"))
+        pnl_sgd    = round(pnl * USD_SGD, 2)
+        wins       = state.get("wins", 0)
+        losses     = state.get("losses", 0)
+        live_bal   = trader.get_balance()
+        bal_sgd    = round(live_bal * USD_SGD, 2)
 
         if pnl < 0:
             set_cooldown(state)
             state["losses"]        = losses + 1
             state["consec_losses"] = state.get("consec_losses", 0) + 1
             alert.send(
-                "🔴 SL / LOSS\n"
+                "🔴 SL HIT — LOSS\n"
                 + ASSET["emoji"] + " EUR/USD\n"
-                "Loss:  $" + str(round(pnl, 2)) + " USD\n"
-                "     ≈ SGD -" + str(abs(pnl_sgd)) + "\n"
+                "Loss:      SGD -" + str(abs(pnl_sgd)) + "\n"
+                "Balance:   SGD " + str(bal_sgd) + "\n"
                 "⏳ Cooldown " + str(COOLDOWN_MIN) + " min\n"
-                "W/L: " + str(wins) + "/" + str(state["losses"])
+                "W/L today: " + str(wins) + "/" + str(state["losses"])
             )
         else:
             state["wins"]          = wins + 1
             state["consec_losses"] = 0
             alert.send(
-                "✅ TP HIT\n"
+                "✅ TP HIT — WIN\n"
                 + ASSET["emoji"] + " EUR/USD\n"
-                "Profit: $+" + str(round(pnl, 2)) + " USD\n"
-                "      ≈ SGD +" + str(pnl_sgd) + "\n"
-                "W/L: " + str(state["wins"]) + "/" + str(losses)
+                "Profit:    SGD +" + str(pnl_sgd) + "\n"
+                "Balance:   SGD " + str(bal_sgd) + "\n"
+                "W/L today: " + str(state["wins"]) + "/" + str(losses)
             )
     except Exception as e:
         log.warning("SL/TP detect error: " + str(e))
@@ -230,18 +232,6 @@ def run_bot(state):
     log.info("Session: " + sess["label"] + " (" + sess["sgt_label"] + ")" +
              " | Max spread: " + str(sess["max_spread"]) + "p")
 
-    # ── Session open alert (once per session per day) ─────────────────
-    alert_key = "sess_" + today + "_" + sess["label"]
-    if not state.get("session_alerted", {}).get(alert_key) and \
-       now_utc.hour == sess["utc_start"]:
-        state.setdefault("session_alerted", {})[alert_key] = True
-        alert.send(
-            "🔔 " + sess["label"] + " Session Open!\n"
-            "⏰ " + sess["sgt_label"] + "\n"
-            "Pair: EUR/USD | TP=" + str(TP_PIPS) + "p SL=" + str(SL_PIPS) + "p\n"
-            "Balance: $" + str(round(state.get("start_balance", 0), 2))
-        )
-
     # ── Login ─────────────────────────────────────────────────────────
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
@@ -251,6 +241,33 @@ def run_bot(state):
     current_balance = trader.get_balance()
     if "start_balance" not in state or state["start_balance"] == 0.0:
         state["start_balance"] = current_balance
+
+    # ── Session open alert (once per session per day) ─────────────────
+    # Fires AFTER login so balance is always live and accurate
+    alert_key = "sess_" + today + "_" + sess["label"]
+    if not state.get("session_alerted", {}).get(alert_key) and \
+       now_utc.hour == sess["utc_start"]:
+        state.setdefault("session_alerted", {})[alert_key] = True
+        bal_usd     = round(current_balance, 2)
+        bal_sgd     = round(current_balance * USD_SGD, 2)
+        start_usd   = round(state.get("start_balance", current_balance), 2)
+        start_sgd   = round(start_usd * USD_SGD, 2)
+        daily_usd   = round(current_balance - start_usd, 2)
+        daily_sgd   = round(daily_usd * USD_SGD, 2)
+        daily_sign  = "+" if daily_sgd >= 0 else ""
+        wins        = state.get("wins", 0)
+        losses      = state.get("losses", 0)
+        alert.send(
+            "🔔 " + sess["label"] + " Session Open!\n"
+            "⏰ " + sess["sgt_label"] + "\n"
+            "─────────────────\n"
+            "💰 Balance:    SGD " + str(bal_sgd) + "\n"
+            "📈 Day start:  SGD " + str(start_sgd) + "\n"
+            "📊 Daily P&L:  SGD " + daily_sign + str(daily_sgd) + "\n"
+            "🏆 W/L today:  " + str(wins) + "/" + str(losses) + "\n"
+            "─────────────────\n"
+            "Pair: EUR/USD | TP=" + str(TP_PIPS) + "p SL=" + str(SL_PIPS) + "p"
+        )
 
     detect_sl_tp_hits(state, trader, alert)
 
@@ -274,13 +291,14 @@ def run_bot(state):
                     state.get("open_times", {}).pop(name, None)
                     if pnl < 0:
                         set_cooldown(state)
+                    live_bal_sgd = round(trader.get_balance() * USD_SGD, 2)
                     alert.send(
                         "⏰ 45-MIN TIMEOUT\n"
                         + ASSET["emoji"] + " EUR/USD\n"
                         "Closed at " + str(round(mins, 1)) + " min\n"
-                        "PnL: $" + str(round(pnl, 2)) + " USD " +
+                        "PnL:     SGD " + ("+" if pnl_sgd >= 0 else "") + str(pnl_sgd) + " " +
                         ("✅" if pnl >= 0 else "🔴") + "\n"
-                        "   ≈ SGD " + str(pnl_sgd)
+                        "Balance: SGD " + str(live_bal_sgd)
                     )
         except Exception as e:
             log.warning("Duration check error: " + str(e))
@@ -350,20 +368,20 @@ def run_bot(state):
         state.setdefault("open_times", {})[name] = now_sg.isoformat()
 
         price, _, _ = trader.get_price(name)
+        cur_bal_sgd = round(current_balance * USD_SGD, 2)
         alert.send(
             "🔄 NEW TRADE!  [" + sess["label"] + "]\n"
             + ASSET["emoji"] + " EUR/USD\n"
             "Direction: " + direction + "\n"
-            "Score:     " + str(score) + "/4 ✅\n"
-            "Size:      74,000 units\n"
             "Entry:     " + str(round(price, ASSET["precision"])) + "\n"
-            "SL:        " + str(SL_PIPS) + " pips ≈ SGD " + str(sl_sgd) + "\n"
-            "TP:        " + str(TP_PIPS) + " pips ≈ SGD " + str(tp_sgd) + "\n"
-            "Max Time:  45 min\n"
-            "Spread:    " + str(round(spread_pip, 2)) + "p\n"
-            "Session:   " + sess["sgt_label"] + "\n"
+            "─────────────────\n"
+            "SL:        " + str(SL_PIPS) + " pips = SGD " + str(sl_sgd) + "\n"
+            "TP:        " + str(TP_PIPS) + " pips = SGD " + str(tp_sgd) + "\n"
+            "─────────────────\n"
+            "Balance:   SGD " + str(cur_bal_sgd) + "\n"
             "Day trade: " + str(today_trades + 1) + "/" + str(MAX_PER_DAY) + "\n"
-            "Signals:   " + details
+            "Session:   " + sess["sgt_label"] + "\n"
+            "Spread:    " + str(round(spread_pip, 2)) + "p | Score: " + str(score) + "/4 ✅"
         )
         log.info(name + ": PLACED " + direction +
                  " TP=SGD" + str(tp_sgd) + " SL=SGD" + str(sl_sgd))
