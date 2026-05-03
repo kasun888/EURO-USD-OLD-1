@@ -74,6 +74,43 @@ def usd_to_sgd(amount):
     return round(amount, 2)
 
 
+def get_h4_direction():
+    """
+    FIX-3: Check current H4 trend direction.
+    Used by smart flip detection after consecutive SL hits.
+    Returns "BUY", "SELL", or None if unclear.
+    """
+    try:
+        api_key  = os.environ.get("OANDA_API_KEY", "")
+        base_url = "https://api-fxpractice.oanda.com"
+        headers  = {"Authorization": "Bearer " + api_key}
+        url      = base_url + "/v3/instruments/EUR_USD/candles"
+        params   = {"count": "55", "granularity": "H4", "price": "M"}
+        r        = requests.get(url, headers=headers, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        candles  = [x for x in r.json()["candles"] if x["complete"]]
+        closes   = [float(x["mid"]["c"]) for x in candles]
+        if len(closes) < 52:
+            return None
+        # EMA50
+        seed = sum(closes[:50]) / 50
+        ema  = seed
+        mult = 2 / 51
+        for c in closes[50:]:
+            ema = (c - ema) * mult + ema
+        # 3-bar consistency check
+        last3 = closes[-3:]
+        if all(c > ema for c in last3):
+            return "BUY"
+        elif all(c < ema for c in last3):
+            return "SELL"
+        return None
+    except Exception as e:
+        log.warning("get_h4_direction error: " + str(e))
+        return None
+
+
 def get_active_session(hour):
     cfg = ASSETS["EUR_USD"]
     for s in cfg["sessions"]:
@@ -154,10 +191,42 @@ def detect_sl_tp_hits(state, trader, alert):
                 if pnl_usd < 0:
                     set_cooldown(state, name)
                     state["losses"]        = losses + 1
-                    state["consec_losses"] = state.get("consec_losses", 0) + 1
+                    consec = state.get("consec_losses", 0) + 1
+                    state["consec_losses"] = consec
                     alert.send_sl_hit(pnl_usd, pnl_sgd, balance_sgd,
                                       state["wins"], state["losses"],
                                       open_price, close_price)
+
+                    # ── FIX-3: SMART FLIP DETECTION ──────────────────────
+                    # After 2 consecutive SL hits, check if H4 trend has
+                    # flipped. If yes: resume in new direction immediately.
+                    # If no: pause 2 days (genuine choppy market).
+                    if consec >= 2:
+                        from datetime import timedelta
+                        last_dir   = state.get("last_trade_direction", "")
+                        h4_dir_now = get_h4_direction()
+                        log.info("Smart flip — last=" + last_dir + " H4=" + str(h4_dir_now))
+                        if h4_dir_now and last_dir and h4_dir_now != last_dir:
+                            state["consec_losses"] = 0
+                            state.pop("pause_until", None)
+                            log.info("H4 FLIPPED " + last_dir + "→" + h4_dir_now + " — resuming")
+                            alert.send(
+                                "🔄 TREND FLIP DETECTED\n"
+                                "H4: " + last_dir + " → " + h4_dir_now + "\n"
+                                "Resuming immediately in new direction.\n"
+                                "No pause — market shifted, not choppy."
+                            )
+                        else:
+                            pause_dt = datetime.now(timezone.utc) + timedelta(days=2)
+                            state["pause_until"] = pause_dt.isoformat()
+                            state["consec_losses"] = 0
+                            log.warning("CIRCUIT BREAKER — same H4 dir, pausing 2 days")
+                            alert.send(
+                                "⛔ CIRCUIT BREAKER\n"
+                                "2 SL hits, H4 direction unchanged (" + str(h4_dir_now) + ").\n"
+                                "Pausing 2 days — ranging/choppy market.\n"
+                                "Resumes automatically."
+                            )
                 else:
                     state["wins"]          = wins + 1
                     state["consec_losses"] = 0
@@ -284,10 +353,18 @@ def run_bot(state):
 
     detect_sl_tp_hits(state, trader, alert)
 
-    # ── 30-MIN HARD CLOSE ──────────────────────────────────────────────
+    # ── HARD CLOSE (MAX_DURATION) ──────────────────────────────────────
+    # FIX: Only attempt close if position is STILL open.
+    # If already closed by SL/TP, skip silently (stops 276-reject loop).
     for name in ASSETS:
+        # Skip if we don't think a trade is open for this instrument
+        if name not in state.get("open_times", {}):
+            continue
         pos = trader.get_position(name)
         if not pos:
+            # Position already closed (by SL or TP) — clean up and skip
+            log.info(name + ": position already closed — skipping timeout check")
+            state.get("open_times", {}).pop(name, None)
             continue
         try:
             trade_id, open_str = trader.get_open_trade_id(name)
@@ -299,16 +376,35 @@ def run_bot(state):
             if mins >= MAX_DURATION:
                 pnl_usd = trader.check_pnl(pos)
                 pnl_sgd = usd_to_sgd(pnl_usd)
-                trader.close_position(name)
+                result  = trader.close_position(name)
                 state.get("open_times", {}).pop(name, None)
-                alert.send_timeout_close(
-                    minutes=mins,
-                    pnl_usd=pnl_usd,
-                    pnl_sgd=pnl_sgd,
-                    balance_sgd=current_balance_sgd,
-                )
+                if result.get("success"):
+                    alert.send_timeout_close(
+                        minutes=mins,
+                        pnl_usd=pnl_usd,
+                        pnl_sgd=pnl_sgd,
+                        balance_sgd=current_balance_sgd,
+                    )
+                else:
+                    log.warning(name + ": timeout close failed — " + str(result.get("error","")))
         except Exception as e:
             log.warning("Duration check " + name + ": " + str(e))
+
+    # ── CIRCUIT BREAKER CHECK ────────────────────────────────────────
+    pause_until = state.get("pause_until")
+    if pause_until:
+        try:
+            remaining = (datetime.fromisoformat(pause_until) -
+                         datetime.now(timezone.utc)).total_seconds()
+            if remaining > 0:
+                days_left = round(remaining / 86400, 1)
+                log.info("Circuit breaker active — " + str(days_left) + " days remaining")
+                return
+            else:
+                state.pop("pause_until", None)
+                log.info("Circuit breaker expired — resuming")
+        except Exception:
+            state.pop("pause_until", None)
 
     # ── SCAN + TRADE ───────────────────────────────────────────────────
     threshold = settings.get("signal_threshold", 4)
@@ -377,6 +473,8 @@ def run_bot(state):
             if "open_times" not in state:
                 state["open_times"] = {}
             state["open_times"][name] = now.isoformat()
+            # FIX-3: save direction for smart flip detection
+            state["last_trade_direction"] = direction
 
             # Track session-level trades
             sess_key = "session_trades_" + session["label"]

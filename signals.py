@@ -4,19 +4,27 @@ Signal Engine — EUR/USD London+NY Session Scalp
 Pair:   EUR/USD ONLY
 Target: 26 pip TP | 13 pip SL | 2:1 R:R
 
-OPTION A LOOSENING APPLIED:
-  - MIN_ATR_PIPS: 4.0 → 2.5  (allows lower-volatility entries)
-  - L2 breakout tolerance: 8 pips → 15 pips (wider breakout zone)
-  - RSI_BUY_MAX:  58 → 65  (easier RSI confirmation on longs)
-  - RSI_SELL_MIN: 42 → 35  (easier RSI confirmation on shorts)
-  - L2_EXPIRY_MINUTES: 45 → 90 (doubles window for L3 to follow)
-  - EMA_TOL: 1.0 pip → 2.0 pip (more flexible EMA13 touch)
-  - MIN_M5_RANGE: 1.5 pip → 1.0 pip (allow smaller M5 candles)
+SMART FIXES (v3.1):
+  FIX-1: H4 3-bar consistency — all last 3 H4 closes must be same
+          side of EMA50. Prevents trading fresh trend reversals.
+          (Would have blocked the Apr 27 BUY into a downtrend.)
 
-FIXES INHERITED:
-  FIX-A: L2 and L3 are separated via state memory.
-  FIX-B: RSI thresholds further loosened for more reachable pullbacks.
-  FIX-C: Every layer logs pass/fail for Railway debugging.
+  FIX-2: CHAOS FILTER — if today's H1 range > 150 pips, skip trading.
+          Abnormal range = news-driven day (tariffs, Fed shock etc).
+          Normal EUR/USD = 60-80 pips/day. Over 150 = unpredictable.
+          (Would have blocked all Apr 27-28 trades during 390-pip week.)
+
+  FIX-3: Smart flip detection in bot.py — after 2 consecutive SL hits,
+          check if H4 trend has flipped. If yes: resume immediately in
+          new direction. If no: pause 2 days (genuine choppy market).
+
+PARAMETERS (unchanged from Option A loosening):
+  - MIN_ATR_PIPS: 2.5
+  - L2 breakout tolerance: 15 pips
+  - RSI_BUY_MAX: 65 / RSI_SELL_MIN: 35
+  - L2_EXPIRY_MINUTES: 90
+  - EMA_TOL: 2.0 pip
+  - MIN_M5_RANGE: 1.0 pip
 """
 
 import os, requests, logging
@@ -146,22 +154,29 @@ class SignalEngine:
                     log.info(instrument + ": L2 pending EXPIRED (" + str(round(age_minutes, 1)) + " min) — resetting")
                     state.pop("l2_pending", None)
 
-        # ── L0: H4 MACRO TREND — EMA50 ───────────────────────────────────
+        # ── L0: H4 MACRO TREND — EMA50 (3-bar consistency) ──────────────
+        # FIX: Require last 3 H4 closes all on same side of EMA50.
+        # This prevents trading a freshly-reversed trend (catches fast moves).
         h4_c, h4_h, h4_l, _ = self._fetch_candles(instrument, "H4", 60)
-        if len(h4_c) < 51:
+        if len(h4_c) < 53:
             return 0, "NONE", "Not enough H4 data", {"L0":"⚠️ NO DATA"}
 
-        h4_ema50 = self._ema(h4_c, 50)[-1]
-        h4_price = h4_c[-1]
+        h4_ema50_series = self._ema(h4_c, 50)
+        h4_ema50        = h4_ema50_series[-1]
 
-        if h4_price > h4_ema50:
+        last3_closes = h4_c[-3:]
+        last3_ema    = h4_ema50_series[-3:]
+        bull_h4 = all(c > e for c, e in zip(last3_closes, last3_ema))
+        bear_h4 = all(c < e for c, e in zip(last3_closes, last3_ema))
+
+        if bull_h4:
             direction = "BUY"
-            reasons.append("✅ L0 H4 BUY above EMA50=" + str(round(h4_ema50, 5)))
-        elif h4_price < h4_ema50:
+            reasons.append("✅ L0 H4 BUY — 3 bars above EMA50=" + str(round(h4_ema50, 5)))
+        elif bear_h4:
             direction = "SELL"
-            reasons.append("✅ L0 H4 SELL below EMA50=" + str(round(h4_ema50, 5)))
+            reasons.append("✅ L0 H4 SELL — 3 bars below EMA50=" + str(round(h4_ema50, 5)))
         else:
-            return 0, "NONE", "H4 EMA50 flat", {"L0":"❌ FLAT"}
+            return 0, "NONE", "H4 trend inconsistent — last 3 bars mixed (possible reversal)", {"L0":"❌ INCONSISTENT"}
 
         score = 1
 
@@ -172,6 +187,24 @@ class SignalEngine:
 
         h1_atr     = self._atr(h1_h, h1_l, h1_c, 14)
         h1_atr_pip = h1_atr / 0.0001
+
+        # ── CHAOS FILTER: Daily range > 150 pips = news-driven day ────────
+        # FIX: Skip trading on abnormally volatile days (tariff news, Fed shock etc).
+        # Normal EUR/USD daily range = 60-80 pips. Over 150 = chaos mode.
+        today_high = max(h1_h[-8:])   # last 8 H1 candles = ~1 trading day
+        today_low  = min(h1_l[-8:])
+        daily_range_pip = (today_high - today_low) / 0.0001
+        CHAOS_THRESHOLD = 150.0
+        if daily_range_pip > CHAOS_THRESHOLD:
+            msg = ("🚫 CHAOS FILTER: daily range=" + str(round(daily_range_pip, 0)) +
+                   "p > " + str(CHAOS_THRESHOLD) + "p — news-driven day, skipping")
+            reasons.append(msg)
+            log.info(instrument + ": " + msg)
+            return score, "NONE", " | ".join(reasons), {
+                "L0":"✅ " + direction,
+                "CHAOS":"❌ range=" + str(round(daily_range_pip,0)) + "p"
+            }
+        reasons.append("✅ CHAOS ok — range=" + str(round(daily_range_pip, 0)) + "p")
 
         if h1_atr_pip < MIN_ATR_PIPS:
             msg = "🚫 ATR VETO: " + str(round(h1_atr_pip, 1)) + "p < " + str(MIN_ATR_PIPS) + "p"

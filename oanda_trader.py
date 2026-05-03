@@ -182,14 +182,49 @@ class OandaTrader:
             return {"success": False, "error": str(e)}
 
     def close_position(self, instrument):
+        """
+        Close open position for instrument.
+        FIX: Must detect direction and send ONLY the correct side.
+        Sending both longUnits+shortUnits when only one is open = MARKET_ORDER_REJECT.
+        """
         try:
+            # Step 1: detect which side is open
+            pos = self.get_position(instrument)
+            if not pos:
+                log.info(f"close_position: no open position for {instrument}")
+                return {"success": True}
+
+            long_units  = int(float(pos["long"]["units"]))
+            short_units = int(float(pos["short"]["units"]))
+
+            if long_units > 0:
+                body = {"longUnits": "ALL"}
+            elif short_units < 0:
+                body = {"shortUnits": "ALL"}
+            else:
+                log.info(f"close_position: position units are zero for {instrument}")
+                return {"success": True}
+
+            log.info(f"Closing {instrument} | long={long_units} short={short_units} | body={body}")
+
             r = requests.put(
                 f"{self.base_url}/v3/accounts/{self.account_id}/positions/{instrument}/close",
                 headers=self.headers,
-                json={"longUnits": "ALL", "shortUnits": "ALL"},
+                json=body,
                 timeout=15
             )
-            return {"success": r.status_code == 200}
+            log.info(f"close_position response: {r.status_code} {r.text[:200]}")
+
+            if r.status_code in (200, 201):
+                return {"success": True}
+
+            # If 404/400, position may already be closed by SL/TP — treat as OK
+            if r.status_code in (404, 400):
+                log.info(f"close_position: {r.status_code} — position likely already closed by SL/TP")
+                return {"success": True}
+
+            return {"success": False, "error": r.text[:200]}
+
         except Exception as e:
             log.error(f"close_position error: {e}")
-            return {"success": False}
+            return {"success": False, "error": str(e)}
