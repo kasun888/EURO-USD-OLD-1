@@ -1,41 +1,37 @@
-name: OANDA Demo 2 - Mean Reversion Bot
+name: GBP/USD Triple EMA Bot v3.2
 
 on:
   schedule:
-    - cron: "*/5 21-23 * * 0"   # Sunday 21:00-23:59 UTC (Mon 5am-7am SGT market open)
-    - cron: "*/5 * * * 1-4"     # Mon-Thu all day UTC
-    - cron: "*/5 0-21 * * 5"    # Friday up to 21:00 UTC (Fri 11pm SGT market close)
-  workflow_dispatch:             # Manual trigger anytime
+    - cron: "*/5 * * * 1-5"   # every 5 min, Mon-Fri, all day
+    - cron: "0 0 * * 1-5"     # daily state reset 00:00 UTC
+  workflow_dispatch:
 
 jobs:
   trade:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Mean Reversion Bot
+      - run: pip install -r requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: bot-state-${{ github.run_number }}
+          restore-keys: bot-state-
+      - name: Run bot
         env:
           OANDA_API_KEY:    ${{ secrets.OANDA_API_KEY }}
           OANDA_ACCOUNT_ID: ${{ secrets.OANDA_ACCOUNT_ID }}
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python bot.py
-
-      - name: Save logs
-        if: always()
+        run: python main.py
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: demo2-logs-${{ github.run_number }}
+          name: bot-logs-${{ github.run_number }}
           path: |
-            trades_*.json
-            performance_log.txt
-          retention-days: 30
+            *.log
+            bot_state.json
+          retention-days: 14
