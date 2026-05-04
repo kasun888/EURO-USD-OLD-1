@@ -1,16 +1,20 @@
 """
-OANDA — EUR/USD London + NY Session Scalp Bot
-==============================================
+OANDA — EUR/USD 24/5 Scalp Bot
+================================
 Pair:    EUR/USD only
 Size:    74,000 units
 SL:      13 pips
 TP:      26 pips  [2:1 R:R]
-Max dur: 30 minutes
+Max dur: 45 minutes
 Account: SGD
 
-WINDOWS (SGT = UTC+8):
-  London Open  15:00–19:00 SGT  (max spread 1.2 pip)
-  NY Session   20:00–00:00 SGT  (max spread 1.5 pip)
+TRADING HOURS: 24 hours Mon–Fri (SGT = UTC+8)
+  Asian       00:00–07:00 SGT  max spread 2.0p  (lower vol, ATR filter protects)
+  London      07:00–15:00 SGT  max spread 1.2p  (best liquidity)
+  NY          15:00–23:00 SGT  max spread 1.5p
+  Rollover    23:00–24:00 SGT  max spread 3.0p  (skip if spread too wide)
+
+Chaos filter (>150 pip range) + ATR flat filter still protect quality.
 """
 
 import os, json, time, logging, requests
@@ -32,7 +36,7 @@ signals = SignalEngine()
 TRADE_SIZE   = 74000
 SL_PIPS      = 13
 TP_PIPS      = 26
-MAX_DURATION = 30
+MAX_DURATION = 45  # extended from 30 — gives 26-pip TP more time to hit
 
 # Account is natively SGD — no conversion needed.
 # P&L from OANDA API (realizedPL / unrealizedPL) is also in account currency (SGD).
@@ -49,8 +53,10 @@ ASSETS = {
         "stop_pips":  SL_PIPS,
         "tp_pips":    TP_PIPS,
         "sessions": [
-            {"start": 15, "end": 19, "max_spread": 1.2, "label": "London"},
-            {"start": 20, "end": 24, "max_spread": 1.5, "label": "NY"},
+            {"start":  0, "end":  7, "max_spread": 2.0, "label": "Asian"},
+            {"start":  7, "end": 15, "max_spread": 1.2, "label": "London"},
+            {"start": 15, "end": 23, "max_spread": 1.5, "label": "NY"},
+            {"start": 23, "end": 24, "max_spread": 3.0, "label": "Rollover"},
         ],
     },
 }
@@ -233,17 +239,20 @@ def detect_sl_tp_hits(state, trader, alert):
                     alert.send_tp_hit(pnl_usd, pnl_sgd, balance_sgd,
                                       state["wins"], state["losses"],
                                       open_price, close_price)
+                del state["open_times"][name]
         except Exception as e:
             log.warning("SL/TP detect error " + name + ": " + str(e))
-        del state["open_times"][name]
+            # Do NOT delete open_times on error — retry next scan
 
 
 def check_session_open_alerts(state, alert, trader, now, today):
     """Send session open alert once per window per day."""
     hour = now.hour
     windows = [
-        {"start": 15, "label": "London", "hours": "15:00–19:00"},
-        {"start": 20, "label": "NY",     "hours": "20:00–00:00"},
+        {"start":  0, "label": "Asian",    "hours": "00:00–07:00 SGT"},
+        {"start":  7, "label": "London",   "hours": "07:00–15:00 SGT"},
+        {"start": 15, "label": "NY",       "hours": "15:00–23:00 SGT"},
+        {"start": 23, "label": "Rollover", "hours": "23:00–00:00 SGT"},
     ]
     for w in windows:
         if hour == w["start"]:
@@ -277,8 +286,10 @@ def check_session_close_alerts(state, alert, trader, now, today):
     """Send session close alert when a window ends."""
     hour = now.hour
     windows = [
-        {"end": 19, "label": "London"},
-        {"end":  0, "label": "NY"},
+        {"end":  7, "label": "Asian"},
+        {"end": 15, "label": "London"},
+        {"end": 23, "label": "NY"},
+        {"end":  0, "label": "Rollover"},
     ]
     for w in windows:
         # Fire at the first minute of the closing hour
@@ -322,7 +333,7 @@ def run_bot(state):
     # ── Check active session ───────────────────────────────────────────
     session = get_active_session(hour)
     if not session:
-        log.info("Outside trading windows (" + str(hour) + "h SGT) — next: 15:00 (London) or 20:00 (NY)")
+        log.info("Outside trading windows (" + str(hour) + "h SGT) — bot is 24/5 Mon-Fri")
         return
 
     log.info("Window: " + session["label"] + " | Max spread: " + str(session["max_spread"]) + " pip")
@@ -405,6 +416,14 @@ def run_bot(state):
                 log.info("Circuit breaker expired — resuming")
         except Exception:
             state.pop("pause_until", None)
+
+    # ── FRIDAY CUTOFF — no new trades after 23:00 SGT Friday ────────
+    # Keep existing trades open (SL/TP/timeout handles them)
+    # But don't open new ones near weekend close
+    import calendar as cal_mod
+    if now.weekday() == 4 and now.hour >= 23:  # Friday 23:00 SGT onward
+        log.info("Friday 23:00 SGT+ — no new trades (weekend risk). Monitoring open positions only.")
+        return
 
     # ── SCAN + TRADE ───────────────────────────────────────────────────
     threshold = settings.get("signal_threshold", 4)
